@@ -1,0 +1,14 @@
+{
+    "models": {
+      "model1": {
+        "balance": 1000,
+        "weight": 1.0
+      },
+      "model2": {
+        "balance": 1000,
+        "weight": 1.0
+      }
+      
+    }
+  }
+  

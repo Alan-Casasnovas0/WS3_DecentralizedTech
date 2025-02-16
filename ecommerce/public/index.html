@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>E-commerce Frontend</title>
+  <!-- Vous pouvez inclure Bootstrap si vous le souhaitez -->
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0/css/bootstrap.min.css">
+</head>
+<body>
+  <div class="container">
+    <h1>E-commerce Store</h1>
+    <div id="products"></div>
+  </div>
+  <script>
+    fetch('http://localhost:3001/products')
+      .then(response => response.json())
+      .then(data => {
+        let html = '<ul class="list-group">';
+        data.forEach(product => {
+          html += `<li class="list-group-item">${product.name} - $${product.price}</li>`;
+        });
+        html += '</ul>';
+        document.getElementById('products').innerHTML = html;
+      })
+      .catch(error => console.error('Error fetching products:', error));
+  </script>
+</body>
+</html>
