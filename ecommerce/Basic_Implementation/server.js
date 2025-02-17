@@ -1,151 +1,156 @@
 const express = require('express');
-const bodyParser = require('body-parser');
-const fs = require('fs');
+const { Low } = require('lowdb');
+const { JSONFileSync } = require('lowdb/node');
+const { v4: uuidv4 } = require('uuid');
+
+// Initialize database
+const adapter = new JSONFileSync('database.json');
+const db = new Low(adapter);
+
+// Read the data from the file
+db.read().then(() => {
+    // Initialize data structure if it doesn't exist
+    if (!db.data) {
+        db.data = { 
+            products: [],
+            orders: [],
+            carts: {}
+        };
+        db.write(); // Write the initialized data back to the file
+    }
+})
+
 const app = express();
-const port = process.env.PORT || 3001;
+app.use(express.json());
 
-app.use(bodyParser.json());
-
-const DB_FILE = './db.json';
-
-// Fonctions utilitaires pour lire/écrire la DB
-function readDB() {
-  if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify({ products: [], orders: [], carts: {} }));
-  }
-  return JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-}
-
-function writeDB(data) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-}
-
-// ----------------------
-// Routes Produits
-// ----------------------
-
-// GET /products (avec filtres optionnels : category, inStock)
+// Products Routes
 app.get('/products', (req, res) => {
-  const db = readDB();
-  let products = db.products;
-  if(req.query.category) {
-    products = products.filter(p => p.category === req.query.category);
-  }
-  if(req.query.inStock) {
-    const inStock = req.query.inStock === 'true';
-    products = products.filter(p => inStock ? p.stock > 0 : p.stock <= 0);
-  }
-  res.json(products);
+    let products = db.data.products;
+    
+    if (req.query.category) {
+        products = products.filter(p => p.category === req.query.category);
+    }
+    
+    if (req.query.inStock === 'true') {
+        products = products.filter(p => p.stock > 0);
+    }
+    
+    res.json(products);
 });
 
-// GET /products/:id
 app.get('/products/:id', (req, res) => {
-  const db = readDB();
-  const product = db.products.find(p => p.id == req.params.id);
-  if(product) {
-    res.json(product);
-  } else {
-    res.status(404).json({ error: "Product not found" });
-  }
+    const product = db.data.products.find(p => p.id === req.params.id);
+    res.json(product || { error: 'Product not found' });
 });
 
-// POST /products
 app.post('/products', (req, res) => {
-  const db = readDB();
-  const newProduct = { ...req.body, id: Date.now() };
-  db.products.push(newProduct);
-  writeDB(db);
-  res.json(newProduct);
+    const newProduct = {
+        id: uuidv4(),
+        ...req.body,
+        createdAt: new Date().toISOString()
+    };
+    
+    db.data.products.push(newProduct);
+    db.write();
+    res.status(201).json(newProduct);
 });
 
-// PUT /products/:id
 app.put('/products/:id', (req, res) => {
-  const db = readDB();
-  let product = db.products.find(p => p.id == req.params.id);
-  if(product) {
-    product = Object.assign(product, req.body);
-    db.products = db.products.map(p => p.id == req.params.id ? product : p);
-    writeDB(db);
-    res.json(product);
-  } else {
-    res.status(404).json({ error: "Product not found" });
-  }
+    const index = db.data.products.findIndex(p => p.id === req.params.id);
+    
+    if (index === -1) {
+        return res.status(404).json({ error: 'Product not found' });
+    }
+    
+    db.data.products[index] = {
+        ...db.data.products[index],
+        ...req.body
+    };
+    
+    db.write();
+    res.json(db.data.products[index]);
 });
 
-// DELETE /products/:id
 app.delete('/products/:id', (req, res) => {
-  const db = readDB();
-  const initialLength = db.products.length;
-  db.products = db.products.filter(p => p.id != req.params.id);
-  if(db.products.length < initialLength) {
-    writeDB(db);
-    res.json({ message: "Product deleted successfully" });
-  } else {
-    res.status(404).json({ error: "Product not found" });
-  }
+    const initialLength = db.data.products.length;
+    db.data.products = db.data.products.filter(p => p.id !== req.params.id);
+    
+    if (db.data.products.length === initialLength) {
+        return res.status(404).json({ error: 'Product not found' });
+    }
+    
+    db.write();
+    res.json({ message: 'Product deleted successfully' });
 });
 
-// ----------------------
-// Routes Commandes
-// ----------------------
-
-// POST /orders
+// Orders Routes
 app.post('/orders', (req, res) => {
-  const db = readDB();
-  const newOrder = {
-    id: Date.now(),
-    products: req.body.products,
-    total: req.body.total || 0,
-    status: "created",
-    userId: req.body.userId || null
-  };
-  db.orders.push(newOrder);
-  writeDB(db);
-  res.json(newOrder);
+    const order = {
+        id: uuidv4(),
+        userId: req.body.userId,
+        items: req.body.items,
+        total: calculateTotal(req.body.items),
+        status: 'pending',
+        createdAt: new Date().toISOString()
+    };
+    
+    db.data.orders.push(order);
+    db.write();
+    res.status(201).json(order);
 });
 
-// GET /orders/:userId
 app.get('/orders/:userId', (req, res) => {
-  const db = readDB();
-  const orders = db.orders.filter(o => o.userId == req.params.userId);
-  res.json(orders);
+    const orders = db.data.orders.filter(o => o.userId === req.params.userId);
+    res.json(orders);
 });
 
-// ----------------------
-// Routes Panier
-// ----------------------
-
-// POST /cart/:userId
+// Cart Routes
 app.post('/cart/:userId', (req, res) => {
-  const db = readDB();
-  const userId = req.params.userId;
-  if(!db.carts[userId]){
-    db.carts[userId] = [];
-  }
-  db.carts[userId].push(req.body);
-  writeDB(db);
-  res.json(db.carts[userId]);
+    const userId = req.params.userId;
+    const { productId, quantity } = req.body;
+    
+    if (!db.data.carts) db.data.carts = {};
+    if (!db.data.carts[userId]) db.data.carts[userId] = [];
+    
+    const cart = db.data.carts[userId];
+    const existingItem = cart.find(item => item.productId === productId);
+    
+    if (existingItem) {
+        existingItem.quantity += quantity;
+    } else {
+        cart.push({ productId, quantity });
+    }
+    
+    db.write();
+    res.json(cart);
 });
 
-// GET /cart/:userId
 app.get('/cart/:userId', (req, res) => {
-  const db = readDB();
-  res.json(db.carts[req.params.userId] || []);
+    const userId = req.params.userId;
+    const cart = db.data.carts?.[userId] || [];
+    res.json(cart);
 });
 
-// DELETE /cart/:userId/item/:productId
 app.delete('/cart/:userId/item/:productId', (req, res) => {
-  const db = readDB();
-  const userId = req.params.userId;
-  if(db.carts[userId]){
-    db.carts[userId] = db.carts[userId].filter(item => item.productId != req.params.productId);
-    writeDB(db);
-    res.json(db.carts[userId]);
-  } else {
-    res.status(404).json({ error: "Cart not found" });
-  }
+    const userId = req.params.userId;
+    const productId = req.params.productId;
+    
+    if (!db.data.carts?.[userId]) {
+        return res.status(404).json({ error: 'Cart not found' });
+    }
+    
+    db.data.carts[userId] = db.data.carts[userId].filter(item => item.productId !== productId);
+    db.write();
+    res.json(db.data.carts[userId]);
 });
 
-app.listen(port, () => {
-  console.log(`E-commerce server running on port ${port}`);
+function calculateTotal(items) {
+    return items.reduce((total, item) => {
+        const product = db.data.products.find(p => p.id === item.productId);
+        return total + (product?.price || 0) * item.quantity;
+    }, 0);
+}
+
+app.listen(3001, () => {
+    console.log('E-commerce API running on http://localhost:3001');
 });

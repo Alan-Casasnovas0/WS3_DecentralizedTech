@@ -1,162 +1,90 @@
 const express = require('express');
-const bodyParser = require('body-parser');
-const fs = require('fs');
+const { Pool } = require('pg');
+const { MongoClient } = require('mongodb');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const port = process.env.PORT || 3001;
+app.use(express.json());
 
-app.use(bodyParser.json());
+// PostgreSQL Configuration
+const pgPool = new Pool({
+    user: 'postgres',
+    host: 'localhost',
+    database: 'ecommerce',
+    password: 'password',
+    port: 5432,
+});
 
-const PRIMARY_DB = './db_primary.json';
-const MIRROR_DB = './db_mirror.json';
+// MongoDB Configuration
+const mongoClient = new MongoClient('mongodb://localhost:27017');
+let mongoCollection;
 
-// Initialisation de la base si elle n'existe pas
-function initDB() {
-  if (!fs.existsSync(PRIMARY_DB)) {
-    const initData = { products: [], orders: [], carts: {} };
-    fs.writeFileSync(PRIMARY_DB, JSON.stringify(initData, null, 2));
-    fs.writeFileSync(MIRROR_DB, JSON.stringify(initData, null, 2));
-  }
+async function initDatabases() {
+    // Initialize PostgreSQL
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS products (
+            id VARCHAR(255) PRIMARY KEY,
+            name VARCHAR(255),
+            description TEXT,
+            price DECIMAL,
+            category VARCHAR(255),
+            stock INT,
+            created_at TIMESTAMP
+        )
+    `);
+    
+    // Initialize MongoDB
+    await mongoClient.connect();
+    mongoCollection = mongoClient.db('ecommerce').collection('products');
+    await mongoCollection.createIndex({ id: 1 }, { unique: true });
 }
-initDB();
 
-// Fonction de lecture depuis la base primaire
-function readDB() {
-  return JSON.parse(fs.readFileSync(PRIMARY_DB, 'utf8'));
+// Synchronous write handler
+async function syncWrite(operation) {
+    try {
+        // Execute on PostgreSQL
+        await pgPool.query(
+            'INSERT INTO products(id, name, description, price, category, stock, created_at) VALUES($1, $2, $3, $4, $5, $6, $7)',
+            [
+                operation.product.id,
+                operation.product.name,
+                operation.product.description,
+                operation.product.price,
+                operation.product.category,
+                operation.product.stock,
+                new Date(operation.product.createdAt)
+            ]
+        );
+        
+        // Execute on MongoDB
+        await mongoCollection.insertOne(operation.product);
+        
+        return true;
+    } catch (error) {
+        console.error('Sync write failed:', error);
+        // Rollback logic would go here
+        return false;
+    }
 }
 
-// Fonction d'écriture synchronisée dans la base primaire et le miroir
-function writeDB(data) {
-  fs.writeFileSync(PRIMARY_DB, JSON.stringify(data, null, 2));
-  fs.writeFileSync(MIRROR_DB, JSON.stringify(data, null, 2));
-}
-
-// ----------------------
-// Routes Produits
-// ----------------------
-
-// GET /products (avec filtres optionnels : category, inStock)
-app.get('/products', (req, res) => {
-  const db = readDB();
-  let products = db.products;
-  if (req.query.category) {
-    products = products.filter(p => p.category === req.query.category);
-  }
-  if (req.query.inStock) {
-    const inStock = req.query.inStock === 'true';
-    products = products.filter(p => inStock ? p.stock > 0 : p.stock <= 0);
-  }
-  res.json(products);
+// Products Routes with Sync
+app.post('/products', async (req, res) => {
+    const newProduct = {
+        id: uuidv4(),
+        ...req.body,
+        createdAt: new Date().toISOString()
+    };
+    
+    const success = await syncWrite({ type: 'CREATE_PRODUCT', product: newProduct });
+    
+    if (success) {
+        res.status(201).json(newProduct);
+    } else {
+        res.status(500).json({ error: 'Failed to create product' });
+    }
 });
 
-// GET /products/:id
-app.get('/products/:id', (req, res) => {
-  const db = readDB();
-  const product = db.products.find(p => p.id == req.params.id);
-  if (product) {
-    res.json(product);
-  } else {
-    res.status(404).json({ error: "Product not found" });
-  }
-});
-
-// POST /products
-app.post('/products', (req, res) => {
-  const db = readDB();
-  const newProduct = { ...req.body, id: Date.now() };
-  db.products.push(newProduct);
-  writeDB(db);
-  res.json(newProduct);
-});
-
-// PUT /products/:id
-app.put('/products/:id', (req, res) => {
-  const db = readDB();
-  let product = db.products.find(p => p.id == req.params.id);
-  if (product) {
-    product = { ...product, ...req.body };
-    db.products = db.products.map(p => p.id == req.params.id ? product : p);
-    writeDB(db);
-    res.json(product);
-  } else {
-    res.status(404).json({ error: "Product not found" });
-  }
-});
-
-// DELETE /products/:id
-app.delete('/products/:id', (req, res) => {
-  const db = readDB();
-  const initialLength = db.products.length;
-  db.products = db.products.filter(p => p.id != req.params.id);
-  if (db.products.length < initialLength) {
-    writeDB(db);
-    res.json({ message: "Product deleted successfully" });
-  } else {
-    res.status(404).json({ error: "Product not found" });
-  }
-});
-
-// ----------------------
-// Routes Commandes
-// ----------------------
-
-// POST /orders
-app.post('/orders', (req, res) => {
-  const db = readDB();
-  const newOrder = {
-    id: Date.now(),
-    products: req.body.products,
-    total: req.body.total || 0,
-    status: "created",
-    userId: req.body.userId || null
-  };
-  db.orders.push(newOrder);
-  writeDB(db);
-  res.json(newOrder);
-});
-
-// GET /orders/:userId
-app.get('/orders/:userId', (req, res) => {
-  const db = readDB();
-  const orders = db.orders.filter(o => o.userId == req.params.userId);
-  res.json(orders);
-});
-
-// ----------------------
-// Routes Panier
-// ----------------------
-
-// POST /cart/:userId
-app.post('/cart/:userId', (req, res) => {
-  const db = readDB();
-  const userId = req.params.userId;
-  if (!db.carts[userId]) {
-    db.carts[userId] = [];
-  }
-  db.carts[userId].push(req.body);
-  writeDB(db);
-  res.json(db.carts[userId]);
-});
-
-// GET /cart/:userId
-app.get('/cart/:userId', (req, res) => {
-  const db = readDB();
-  res.json(db.carts[req.params.userId] || []);
-});
-
-// DELETE /cart/:userId/item/:productId
-app.delete('/cart/:userId/item/:productId', (req, res) => {
-  const db = readDB();
-  const userId = req.params.userId;
-  if (db.carts[userId]) {
-    db.carts[userId] = db.carts[userId].filter(item => item.productId != req.params.productId);
-    writeDB(db);
-    res.json(db.carts[userId]);
-  } else {
-    res.status(404).json({ error: "Cart not found" });
-  }
-});
-
-app.listen(port, () => {
-  console.log(`Synchronous Mirroring server running on port ${port}`);
+app.listen(3002, async () => {
+    await initDatabases();
+    console.log('Synchronous Mirroring API running on http://localhost:3002');
 });
